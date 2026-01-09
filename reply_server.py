@@ -1310,8 +1310,9 @@ class CookieStatusIn(BaseModel):
 
 
 class DefaultReplyIn(BaseModel):
-    enabled: bool
+    enabled: Optional[bool] = None
     reply_content: Optional[str] = None
+    default_reply: Optional[str] = None  # 兼容旧前端字段
     reply_image_url: Optional[str] = None
     reply_once: bool = False
 
@@ -2635,6 +2636,13 @@ def update_default_reply(cid: str, reply_data: DefaultReplyIn, current_user: Dic
     """更新指定账号的默认回复设置"""
     from db_manager import db_manager
     try:
+        # 兼容旧前端请求
+        if reply_data.default_reply is not None and reply_data.reply_content is None:
+            reply_data.reply_content = reply_data.default_reply
+        
+        if reply_data.enabled is None:
+            reply_data.enabled = True
+
         # 检查cookie是否属于当前用户
         user_id = current_user['user_id']
         user_cookies = db_manager.get_all_cookies(user_id)
