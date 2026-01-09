@@ -2623,7 +2623,12 @@ def get_default_reply(cid: str, current_user: Dict[str, Any] = Depends(get_curre
         result = db_manager.get_default_reply(cid)
         if result is None:
             # 如果没有设置，返回默认值
-            return {'enabled': False, 'reply_content': '', 'reply_once': False}
+            return {'enabled': False, 'reply_content': '', 'reply_once': False, 'default_reply': ''}
+        
+        # 兼容旧前端
+        if 'reply_content' in result:
+            result['default_reply'] = result['reply_content']
+            
         return result
     except HTTPException:
         raise
@@ -3330,12 +3335,19 @@ def get_keywords(cid: str, current_user: Dict[str, Any] = Depends(get_current_us
 
     # 转换为统一格式
     all_keywords = []
-    for keyword, reply, item_id in item_keywords:
+    for row in item_keywords:
+        if len(row) >= 4:
+            keyword, reply, item_id, fuzzy_match = row[:4]
+        else:
+            keyword, reply, item_id = row
+            fuzzy_match = False
+            
         all_keywords.append({
             "keyword": keyword,
             "reply": reply,
             "item_id": item_id,
-            "type": "item" if item_id else "normal"
+            "type": "item" if item_id else "normal",
+            "fuzzy_match": fuzzy_match
         })
 
     return all_keywords
@@ -3366,7 +3378,8 @@ def get_keywords_with_item_id(cid: str, current_user: Dict[str, Any] = Depends(g
             "reply": keyword_data['reply'],
             "item_id": keyword_data['item_id'] or "",
             "type": keyword_data['type'],
-            "image_url": keyword_data['image_url']
+            "image_url": keyword_data['image_url'],
+            "fuzzy_match": keyword_data.get('fuzzy_match', False)
         })
 
     return result
@@ -3417,6 +3430,8 @@ def update_keywords_with_item_id(cid: str, body: KeywordWithItemIdIn, current_us
         keyword = kw_data.get('keyword', '').strip()
         reply = kw_data.get('reply', '').strip()
         item_id = kw_data.get('item_id', '').strip() or None
+        # 兼容前端字段名：fuzzy_match 或 fuzzy
+        fuzzy_match = kw_data.get('fuzzy_match', False) or kw_data.get('fuzzy', False)
 
         if not keyword:
             raise HTTPException(status_code=400, detail="关键词不能为空")
@@ -3428,7 +3443,7 @@ def update_keywords_with_item_id(cid: str, body: KeywordWithItemIdIn, current_us
             raise HTTPException(status_code=400, detail=f"关键词 '{keyword}' {item_id_text} 在当前提交中重复")
         keyword_set.add(keyword_key)
 
-        keywords_to_save.append((keyword, reply, item_id))
+        keywords_to_save.append((keyword, reply, item_id, fuzzy_match))
 
     # 保存关键词（只保存文本关键词，保留图片关键词）
     try:

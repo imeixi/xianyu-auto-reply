@@ -272,6 +272,15 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE keywords ADD COLUMN item_id TEXT")
                 logger.info("keywords 表 item_id 列添加完成")
 
+            # 检查并添加 fuzzy_match 列（用于模糊匹配功能）
+            try:
+                self._execute_sql(cursor, "SELECT fuzzy_match FROM keywords LIMIT 1")
+            except sqlite3.OperationalError:
+                # fuzzy_match 列不存在，需要添加
+                logger.info("正在为 keywords 表添加 fuzzy_match 列...")
+                self._execute_sql(cursor, "ALTER TABLE keywords ADD COLUMN fuzzy_match BOOLEAN DEFAULT FALSE")
+                logger.info("keywords 表 fuzzy_match 列添加完成")
+
             # 创建商品信息表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS item_info (
@@ -1522,14 +1531,19 @@ class DBManager:
                 self.conn.rollback()
                 return False
 
-    def save_text_keywords_only(self, cookie_id: str, keywords: List[Tuple[str, str, str]]) -> bool:
+    def save_text_keywords_only(self, cookie_id: str, keywords: List[Tuple[str, str, str, bool]]) -> bool:
         """保存文本关键字列表，只删除文本类型的关键词，保留图片关键词"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
 
                 # 检查是否与现有图片关键词冲突
-                for keyword, reply, item_id in keywords:
+                for keyword_data in keywords:
+                    if len(keyword_data) >= 4:
+                        keyword, reply, item_id, _ = keyword_data[:4]
+                    else:
+                        keyword, reply, item_id = keyword_data
+
                     normalized_item_id = item_id if item_id and item_id.strip() else None
 
                     # 检查是否存在同名的图片关键词
@@ -1557,13 +1571,19 @@ class DBManager:
                     (cookie_id,))
 
                 # 插入新的文本关键字
-                for keyword, reply, item_id in keywords:
+                for keyword_data in keywords:
+                    if len(keyword_data) >= 4:
+                        keyword, reply, item_id, fuzzy_match = keyword_data[:4]
+                    else:
+                        keyword, reply, item_id = keyword_data
+                        fuzzy_match = False
+
                     # 标准化item_id：空字符串转为NULL
                     normalized_item_id = item_id if item_id and item_id.strip() else None
 
                     self._execute_sql(cursor,
-                        "INSERT INTO keywords (cookie_id, keyword, reply, item_id, type) VALUES (?, ?, ?, ?, 'text')",
-                        (cookie_id, keyword, reply, normalized_item_id))
+                        "INSERT INTO keywords (cookie_id, keyword, reply, item_id, type, fuzzy_match) VALUES (?, ?, ?, ?, 'text', ?)",
+                        (cookie_id, keyword, reply, normalized_item_id, fuzzy_match))
 
                 self.conn.commit()
                 logger.info(f"文本关键字保存成功: {cookie_id}, {len(keywords)}条，图片关键词已保留")
@@ -1587,13 +1607,18 @@ class DBManager:
                 logger.error(f"获取关键字失败: {e}")
                 return []
 
-    def get_keywords_with_item_id(self, cookie_id: str) -> List[Tuple[str, str, str]]:
-        """获取指定Cookie的关键字列表（包含商品ID）"""
+    def get_keywords_with_item_id(self, cookie_id: str) -> List[Tuple[str, str, str, bool]]:
+        """获取指定Cookie的关键字列表（包含商品ID和模糊匹配设置）"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                self._execute_sql(cursor, "SELECT keyword, reply, item_id FROM keywords WHERE cookie_id = ?", (cookie_id,))
-                return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+                try:
+                    self._execute_sql(cursor, "SELECT keyword, reply, item_id, fuzzy_match FROM keywords WHERE cookie_id = ?", (cookie_id,))
+                    return [(row[0], row[1], row[2], bool(row[3]) if row[3] is not None else False) for row in cursor.fetchall()]
+                except sqlite3.OperationalError:
+                    # 如果fuzzy_match列不存在（可能是旧数据库），降级处理
+                    self._execute_sql(cursor, "SELECT keyword, reply, item_id FROM keywords WHERE cookie_id = ?", (cookie_id,))
+                    return [(row[0], row[1], row[2], False) for row in cursor.fetchall()]
             except Exception as e:
                 logger.error(f"获取关键字失败: {e}")
                 return []
@@ -1647,22 +1672,42 @@ class DBManager:
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                self._execute_sql(cursor,
-                    "SELECT keyword, reply, item_id, type, image_url FROM keywords WHERE cookie_id = ?",
-                    (cookie_id,))
+                try:
+                    self._execute_sql(cursor,
+                        "SELECT keyword, reply, item_id, type, image_url, fuzzy_match FROM keywords WHERE cookie_id = ?",
+                        (cookie_id,))
 
-                results = []
-                for row in cursor.fetchall():
-                    keyword_data = {
-                        'keyword': row[0],
-                        'reply': row[1],
-                        'item_id': row[2],
-                        'type': row[3] or 'text',  # 默认为text类型
-                        'image_url': row[4]
-                    }
-                    results.append(keyword_data)
+                    results = []
+                    for row in cursor.fetchall():
+                        keyword_data = {
+                            'keyword': row[0],
+                            'reply': row[1],
+                            'item_id': row[2],
+                            'type': row[3] or 'text',  # 默认为text类型
+                            'image_url': row[4],
+                            'fuzzy_match': bool(row[5]) if row[5] is not None else False
+                        }
+                        results.append(keyword_data)
+                    return results
+                except sqlite3.OperationalError:
+                    # 如果fuzzy_match列不存在（可能是旧数据库），降级处理
+                    self._execute_sql(cursor,
+                        "SELECT keyword, reply, item_id, type, image_url FROM keywords WHERE cookie_id = ?",
+                        (cookie_id,))
 
-                return results
+                    results = []
+                    for row in cursor.fetchall():
+                        keyword_data = {
+                            'keyword': row[0],
+                            'reply': row[1],
+                            'item_id': row[2],
+                            'type': row[3] or 'text',  # 默认为text类型
+                            'image_url': row[4],
+                            'fuzzy_match': False
+                        }
+                        results.append(keyword_data)
+                    return results
+
             except Exception as e:
                 logger.error(f"获取关键字失败: {e}")
                 return []
